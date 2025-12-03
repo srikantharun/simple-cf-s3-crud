@@ -211,11 +211,8 @@ resource "aws_lambda_function" "edge_crud_function" {
   memory_size      = var.lambda_memory_size
   publish          = true # Required for Lambda@Edge
 
-  environment {
-    variables = {
-      S3_BUCKET_NAME = aws_s3_bucket.data_bucket.id
-    }
-  }
+  # Note: Lambda@Edge does not support environment variables
+  # Bucket name is extracted from CloudFront origin in the Lambda code
 
   tags = merge(
     var.common_tags,

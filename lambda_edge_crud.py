@@ -1,21 +1,43 @@
 """
 Lambda@Edge function for handling CRUD operations with S3 backend
 This function runs on Origin Request events in CloudFront
+
+Note: Lambda@Edge does not support environment variables.
+The bucket name is extracted from the CloudFront origin configuration.
 """
 
 import json
 import boto3
 import uuid
-import os
 from datetime import datetime
 from urllib.parse import parse_qs, unquote
 
 s3_client = boto3.client('s3')
-BUCKET_NAME = os.environ.get('S3_BUCKET_NAME', '')
+
+
+def get_bucket_from_request(request):
+    """
+    Extract bucket name from CloudFront origin domain.
+    The domain looks like: "bucket-name.s3.us-east-1.amazonaws.com"
+    or "bucket-name.s3.amazonaws.com"
+    """
+    origin = request.get('origin', {})
+    s3_origin = origin.get('s3', {})
+    domain = s3_origin.get('domainName', '')
+
+    if domain:
+        # Extract bucket name from domain (first part before .s3.)
+        bucket_name = domain.split('.s3.')[0]
+        return bucket_name
+
+    # Fallback to hardcoded value if origin extraction fails
+    return 'simple-cf-s3-crud-data-bucket'
+
 
 def generate_id():
     """Generate a unique ID for new items"""
     return str(uuid.uuid4())
+
 
 def parse_path(path):
     """
@@ -49,6 +71,7 @@ def parse_path(path):
 
     return collection, item_id
 
+
 def get_s3_key(collection, item_id=None):
     """Generate S3 key for storing items"""
     if item_id:
@@ -56,12 +79,13 @@ def get_s3_key(collection, item_id=None):
     else:
         return f"{collection}/"
 
-def list_items_in_collection(collection):
+
+def list_items_in_collection(bucket_name, collection):
     """List all items in a collection"""
     try:
         prefix = f"{collection}/"
         response = s3_client.list_objects_v2(
-            Bucket=BUCKET_NAME,
+            Bucket=bucket_name,
             Prefix=prefix,
             Delimiter='/'
         )
@@ -74,7 +98,7 @@ def list_items_in_collection(collection):
                     try:
                         # Get the item content
                         obj_response = s3_client.get_object(
-                            Bucket=BUCKET_NAME,
+                            Bucket=bucket_name,
                             Key=obj['Key']
                         )
                         item_data = json.loads(obj_response['Body'].read().decode('utf-8'))
@@ -88,12 +112,13 @@ def list_items_in_collection(collection):
         print(f"Error listing items: {str(e)}")
         return []
 
-def get_item(collection, item_id):
+
+def get_item(bucket_name, collection, item_id):
     """Get a specific item from S3"""
     try:
         key = get_s3_key(collection, item_id)
         response = s3_client.get_object(
-            Bucket=BUCKET_NAME,
+            Bucket=bucket_name,
             Key=key
         )
         item_data = json.loads(response['Body'].read().decode('utf-8'))
@@ -104,7 +129,8 @@ def get_item(collection, item_id):
         print(f"Error getting item: {str(e)}")
         raise
 
-def put_item(collection, item_id, data):
+
+def put_item(bucket_name, collection, item_id, data):
     """Store an item in S3"""
     try:
         key = get_s3_key(collection, item_id)
@@ -117,7 +143,7 @@ def put_item(collection, item_id, data):
         data['updated_at'] = datetime.utcnow().isoformat() + 'Z'
 
         s3_client.put_object(
-            Bucket=BUCKET_NAME,
+            Bucket=bucket_name,
             Key=key,
             Body=json.dumps(data),
             ContentType='application/json'
@@ -127,12 +153,13 @@ def put_item(collection, item_id, data):
         print(f"Error putting item: {str(e)}")
         raise
 
-def delete_item(collection, item_id):
+
+def delete_item(bucket_name, collection, item_id):
     """Delete a specific item from S3"""
     try:
         key = get_s3_key(collection, item_id)
         s3_client.delete_object(
-            Bucket=BUCKET_NAME,
+            Bucket=bucket_name,
             Key=key
         )
         return True
@@ -140,25 +167,27 @@ def delete_item(collection, item_id):
         print(f"Error deleting item: {str(e)}")
         raise
 
-def delete_all_items(collection):
+
+def delete_all_items(bucket_name, collection):
     """Delete all items in a collection"""
     try:
         prefix = f"{collection}/"
         response = s3_client.list_objects_v2(
-            Bucket=BUCKET_NAME,
+            Bucket=bucket_name,
             Prefix=prefix
         )
 
         if 'Contents' in response:
             for obj in response['Contents']:
                 s3_client.delete_object(
-                    Bucket=BUCKET_NAME,
+                    Bucket=bucket_name,
                     Key=obj['Key']
                 )
         return True
     except Exception as e:
         print(f"Error deleting all items: {str(e)}")
         raise
+
 
 def create_response(status_code, body, headers=None):
     """Create a CloudFront response"""
@@ -179,6 +208,7 @@ def create_response(status_code, body, headers=None):
         'body': json.dumps(body) if isinstance(body, (dict, list)) else body
     }
 
+
 def handler(event, context):
     """
     Lambda@Edge handler for origin request events
@@ -188,6 +218,9 @@ def handler(event, context):
         method = request['method']
         uri = unquote(request['uri'])
         query_string = request.get('querystring', '')
+
+        # Get bucket name from CloudFront origin
+        bucket_name = get_bucket_from_request(request)
 
         # Parse query parameters
         query_params = parse_qs(query_string) if query_string else {}
@@ -216,7 +249,7 @@ def handler(event, context):
                 'message': 'Path must include at least a collection name'
             })
 
-        print(f"Method: {method}, Collection: {collection}, Item ID: {item_id}, Request Type: {request_type}")
+        print(f"Method: {method}, Collection: {collection}, Item ID: {item_id}, Request Type: {request_type}, Bucket: {bucket_name}")
 
         # Handle CORS preflight
         if method == 'OPTIONS':
@@ -226,7 +259,7 @@ def handler(event, context):
         if method == 'GET':
             if item_id:
                 # Get specific item
-                item = get_item(collection, item_id)
+                item = get_item(bucket_name, collection, item_id)
                 if item:
                     return create_response(200, item)
                 else:
@@ -236,7 +269,7 @@ def handler(event, context):
                     })
             else:
                 # List all items in collection
-                items = list_items_in_collection(collection)
+                items = list_items_in_collection(bucket_name, collection)
                 return create_response(200, {
                     'collection': collection,
                     'count': len(items),
@@ -256,7 +289,7 @@ def handler(event, context):
                 created_items = []
                 for item_data in body:
                     new_id = generate_id()
-                    created_item = put_item(collection, new_id, item_data)
+                    created_item = put_item(bucket_name, collection, new_id, item_data)
                     created_items.append(created_item)
 
                 return create_response(201, {
@@ -266,7 +299,7 @@ def handler(event, context):
             else:
                 # Single item creation
                 new_id = item_id if item_id else generate_id()
-                created_item = put_item(collection, new_id, body)
+                created_item = put_item(bucket_name, collection, new_id, body)
                 return create_response(201, created_item)
 
         # Handle PUT/PATCH requests (update item)
@@ -285,16 +318,16 @@ def handler(event, context):
 
             # For PATCH, merge with existing item
             if method == 'PATCH' or request_type != 'replace':
-                existing_item = get_item(collection, item_id)
+                existing_item = get_item(bucket_name, collection, item_id)
                 if existing_item:
                     existing_item.update(body)
-                    updated_item = put_item(collection, item_id, existing_item)
+                    updated_item = put_item(bucket_name, collection, item_id, existing_item)
                 else:
                     # If item doesn't exist, create it
-                    updated_item = put_item(collection, item_id, body)
+                    updated_item = put_item(bucket_name, collection, item_id, body)
             else:
                 # For PUT with replace, completely replace
-                updated_item = put_item(collection, item_id, body)
+                updated_item = put_item(bucket_name, collection, item_id, body)
 
             return create_response(200, updated_item)
 
@@ -302,20 +335,20 @@ def handler(event, context):
         elif method == 'DELETE':
             if request_type == 'all':
                 # Delete all items in collection
-                delete_all_items(collection)
+                delete_all_items(bucket_name, collection)
                 return create_response(200, {
                     'message': f'All items deleted from collection {collection}'
                 })
             elif item_id:
                 # Delete specific item
-                existing_item = get_item(collection, item_id)
+                existing_item = get_item(bucket_name, collection, item_id)
                 if not existing_item:
                     return create_response(404, {
                         'error': 'Not found',
                         'message': f'Item {item_id} not found in collection {collection}'
                     })
 
-                delete_item(collection, item_id)
+                delete_item(bucket_name, collection, item_id)
                 return create_response(200, {
                     'message': f'Item {item_id} deleted from collection {collection}',
                     'deleted_item': existing_item
