@@ -1,0 +1,407 @@
+version: "1.0"
+
+metadata:
+  project: "donutv8"
+  policy_name: "custom_donut_global_block_version_8"
+  policy_version: "v8"
+  environment: "production"
+  owner: "ABC-XYZ"
+  description: "Donut v8 WAF security policy"
+  account_id: "052407073588"
+
+settings:
+  scope: "CLOUDFRONT"
+  default_action: "count"
+  cloudwatch_metrics_enabled: true
+  sampled_requests_enabled: true
+  body_size_limit: 65536
+
+  fms_admin_account: "139824376857"
+  auto_remediation: true
+  resource_type: "AWS::CloudFront::Distribution"
+  resource_tags:
+    key: "FMManagedWebACLWAFV2-custom_donut_global_block"
+    value: "v8"
+
+  # FMS Policy resource names (Terraform resource identifiers)
+  fms_policy_count_resource_name: "custom_${project}_count"
+  fms_policy_block_resource_name: "custom_${project}_block"
+
+# Reusable host definitions with match type
+allowed_hosts:
+  - host: "dxm3vhoegarcz.cloudfront.net"
+    match: "EXACTLY"
+  - host: "donut-cms-secure.abcd.com.hk"
+    match: "EXACTLY"
+  - host: "donut-api-secure.abcd.com.hk"
+    match: "EXACTLY"
+  - host: "sit.ap-east-1.pm4c.cloud1.vv1865.com"
+    match: "ENDS_WITH"
+
+custom_response_bodies:
+  abcd-default-block:
+    content_type: "APPLICATION_JSON"
+    content: |
+      {"error": "Forbidden", "message": "Request blocked by WAF", "code": "WAF-001"}
+
+rule_groups:
+
+  # =============================================================================
+  # External Rule Groups (Common Modules - passed as ARN variables)
+  # =============================================================================
+
+  size_restrictions:
+    order: 1
+    type: "external"
+    name: "size-restrictions-rule-set"
+    description: "Block oversized headers and cookies"
+    arn_variable: "waf_rg_size_restrictions_arn"
+    override_action_count: "COUNT"
+    override_action_block: "NONE"
+    rule_action_overrides_block:
+      - name: "SizeRestrictions_Body"
+        action: "count"
+
+  log4j:
+    order: 2
+    type: "external"
+    name: "log4j-150"
+    description: "AWS Managed Log4j protection"
+    arn_variable: "waf_rg_log4j_arn"
+    override_action_count: "NONE"
+    override_action_block: "NONE"
+
+  ip_blacklist:
+    order: 3
+    type: "external"
+    name: "abcd-ip-blacklist"
+    description: "Blocked IP addresses"
+    arn_variable: "waf_rg_ip_blacklist_arn"
+    override_action_count: "NONE"
+    override_action_block: "NONE"
+
+  owasp_detection:
+    order: 4
+    type: "external"
+    name: "custom-owasp-top10-size-xss-sqli"
+    description: "OWASP Top 10 detection - SQLi, XSS, Size"
+    # Different ARN for count vs block policies
+    arn_variable_count: "custom_rg_owasp_top10_count_arn"
+    arn_variable_block: "custom_rg_owasp_top10_size_xss_sqli_arn"
+    override_action_count: "COUNT"
+    override_action_block: "NONE"
+
+  # =============================================================================
+  # Custom Rule Groups (Project-Specific - created in this module)
+  # =============================================================================
+
+  # Project-specific SQLi/XSS detection with tuned sensitivity
+  # Use this for endpoints that need custom detection settings
+  custom_detection:
+    order: 5
+    type: "custom"
+    name: "custom-detection-${project}"
+    capacity: 100
+    namespace: "custom"
+    description: "Project-specific SQLi/XSS detection with tuned sensitivity"
+    override_action_count: "COUNT"
+    override_action_block: "NONE"
+    rules:
+      # SQLi detection with LOW sensitivity to avoid false positives
+      # like ----WebKitFormBoundary---- in multipart uploads
+      - name: "detect-sqli-body-low"
+        priority: 1
+        action: "count"
+        label: "custom-mitigate-sqli"
+        statement:
+          sqli_match:
+            field: "BODY"
+            sensitivity_level: "LOW"
+            oversize_handling: "CONTINUE"
+            text_transformations:
+              - priority: 0
+                type: "URL_DECODE"
+              - priority: 1
+                type: "HTML_ENTITY_DECODE"
+
+      - name: "detect-sqli-querystring-low"
+        priority: 2
+        action: "count"
+        label: "custom-mitigate-sqli"
+        statement:
+          sqli_match:
+            field: "QUERY_STRING"
+            sensitivity_level: "LOW"
+            text_transformations:
+              - priority: 0
+                type: "URL_DECODE"
+              - priority: 1
+                type: "LOWERCASE"
+
+      # XSS detection for specific fields
+      # Helps avoid false positives like action=datafeed
+      - name: "detect-xss-body"
+        priority: 3
+        action: "count"
+        label: "custom-mitigate-xss"
+        statement:
+          xss_match:
+            field: "BODY"
+            oversize_handling: "CONTINUE"
+            text_transformations:
+              - priority: 0
+                type: "URL_DECODE"
+              - priority: 1
+                type: "HTML_ENTITY_DECODE"
+
+      - name: "detect-xss-querystring"
+        priority: 4
+        action: "count"
+        label: "custom-mitigate-xss"
+        statement:
+          xss_match:
+            field: "QUERY_STRING"
+            text_transformations:
+              - priority: 0
+                type: "URL_DECODE"
+              - priority: 1
+                type: "HTML_ENTITY_DECODE"
+              - priority: 2
+                type: "LOWERCASE"
+
+  exception_rules:
+    order: 6
+    type: "custom"
+    name: "custom${project}"
+    capacity: 380
+    namespace: "custom"
+    description: "Exception rules for legitimate endpoints"
+    override_action_count: "COUNT"
+    override_action_block: "NONE"
+    rules:
+
+      - name: "custom-10007"
+        priority: 1
+        action: "count"
+        label: "abcd-found-sql-false-positive"
+        wcu: 54
+        statement:
+          and:
+            - label_match:
+                scope: "LABEL"
+                key: "awswaf:${account_id}:rulegroup:custom-owasp-top10-size-xss-sqli:abcd:cyber:custom:owasp:mitigate-sqli"
+            - or_methods: ["post"]
+            - or_hosts: "${allowed_hosts}"
+            - byte_match:
+                field: "URI_PATH"
+                search_string: "/sub-merchants/merchant"
+                positional_constraint: "STARTS_WITH"
+                text_transformations:
+                  - priority: 0
+                    type: "LOWERCASE"
+
+      - name: "custom-10013a"
+        priority: 2
+        action: "count"
+        label: "abcd-found-sql-false-positive"
+        wcu: 44
+        statement:
+          and:
+            - label_match:
+                scope: "LABEL"
+                key: "awswaf:${account_id}:rulegroup:custom-owasp-top10-size-xss-sqli:abcd:cyber:custom:owasp:mitigate-sqli"
+            - or_methods: ["post"]
+            - or_hosts: "${allowed_hosts}"
+            - byte_match:
+                field: "URI_PATH"
+                search_string: "/cso/tickets/quickfileupload"
+                positional_constraint: "STARTS_WITH"
+                text_transformations:
+                  - priority: 0
+                    type: "LOWERCASE"
+
+      - name: "custom-10013c"
+        priority: 3
+        action: "count"
+        label: "abcd-found-xss-false-positive"
+        wcu: 44
+        statement:
+          and:
+            - label_match:
+                scope: "LABEL"
+                key: "awswaf:${account_id}:rulegroup:custom-owasp-top10-size-xss-sqli:abcd:cyber:custom:owasp:mitigate-xss"
+            - or_methods: ["post"]
+            - or_hosts: "${allowed_hosts}"
+            - byte_match:
+                field: "URI_PATH"
+                search_string: "/cso/tickets/quickfileupload"
+                positional_constraint: "STARTS_WITH"
+                text_transformations:
+                  - priority: 0
+                    type: "LOWERCASE"
+
+  # =============================================================================
+  # Catch-All Rule Groups (Can be external modules or custom)
+  # Using external modules for catch-all (custom_catch_application module)
+  # =============================================================================
+
+  xss_catch_all:
+    order: 7
+    type: "module"
+    name: "custom_catch_${project}_xss"
+    description: "Block XSS threats without valid exceptions"
+    module_source: "../../../custom_catch_application"
+    module_params:
+      custom_type: "XSS_XSS"
+      customized_name: "aws_wafv2_rule_group.exception_rules.name"
+    output_arn: "xss_arn"
+    override_action_block: "NONE"
+    # Not included in count policy (only for block)
+    include_in_count: false
+
+  sql_catch_all:
+    order: 8
+    type: "module"
+    name: "custom_catch_${project}_sql"
+    description: "Block SQLi threats without valid exceptions"
+    module_source: "../../../custom_catch_application"
+    module_params:
+      custom_type: "SQL_SQL"
+      customized_name: "aws_wafv2_rule_group.exception_rules.name"
+    output_arn: "sql_arn"
+    override_action_block: "NONE"
+    include_in_count: false
+
+  size_catch_all:
+    order: 9
+    type: "module"
+    name: "custom_catch_${project}_size"
+    description: "Block size violations without valid exceptions"
+    module_source: "../../../custom_catch_application"
+    module_params:
+      custom_type: "SIZE_SIZE"
+      customized_name: "aws_wafv2_rule_group.exception_rules.name"
+    output_arn: "size_arn"
+    override_action_block: "NONE"
+    include_in_count: false
+
+security_policy:
+  name: "custom_donut_global_block_version_8"
+  first_rule_groups:
+    - "size_restrictions"
+    - "log4j"
+    - "ip_blacklist"
+    - "owasp_detection"
+    - "custom_detection"
+    - "exception_rules"
+    - "xss_catch_all"
+    - "sql_catch_all"
+    - "size_catch_all"
+  last_rule_groups: []
+
+test_definitions:
+  settings:
+    base_url: "https://dxm3vhoegarcz.cloudfront.net"
+    default_host: "dxm3vhoegarcz.cloudfront.net"
+    default_user_agent: "wafcoe"
+    test_data_dir: "./test_data"
+
+  test_suites:
+
+    - name: "sql_injection_true_positive"
+      description: "SQLi payloads should be blocked"
+      tests:
+        - id: "custom-10013a-tp"
+          name: "SQLi in quickFileUpload query string"
+          type: "true_positive"
+          expected_status: 403
+          request:
+            method: "POST"
+            uri: "/cso/tickets/quickFileUpload"
+            query_string: "request=?id=1+union+select+1,2,3"
+            headers:
+              Content-Type: "application/json"
+              Host: "dxm3vhoegarcz.cloudfront.net"
+
+        - id: "custom-10007-tp"
+          name: "SQLi in sub-merchants"
+          type: "true_positive"
+          expected_status: 403
+          request:
+            method: "POST"
+            uri: "/sub-merchants/merchant"
+            query_string: "request=?id=1+union+select+1,2,3"
+            headers:
+              Content-Type: "application/json"
+            body_file: "test.json"
+
+    - name: "xss_true_positive"
+      description: "XSS payloads should be blocked"
+      tests:
+        - id: "custom-10013c-tp"
+          name: "XSS script tag in quickFileUpload"
+          type: "true_positive"
+          expected_status: 403
+          request:
+            method: "POST"
+            uri: "/cso/tickets/quickFileUpload"
+            query_string: "request=<script>alert(1)</script>"
+            headers:
+              Content-Type: "application/json"
+
+    - name: "size_restriction_true_positive"
+      description: "Oversized headers should be blocked"
+      tests:
+        - id: "custom-size-001"
+          name: "User-Agent > 8KB should block"
+          type: "true_positive"
+          expected_status: 403
+          request:
+            method: "POST"
+            uri: "/sub-merchants/merchant"
+            headers:
+              Content-Type: "application/json"
+              User-Agent: "${GENERATE:B*8300}"
+            body_file: "test.json"
+
+    - name: "exception_validation"
+      description: "Legitimate requests with exceptions should be allowed"
+      tests:
+        - id: "custom-10001-fp"
+          name: "Valid multipart upload should allow"
+          type: "false_positive"
+          expected_status: 200
+          request:
+            method: "POST"
+            uri: "/abcddonut_cs"
+            headers:
+              Content-Type: "multipart/form-data"
+              Host: "dxm3vhoegarcz.cloudfront.net"
+            body_file: "test.txt"
+
+    - name: "boundary_tests"
+      description: "Requests with mismatched conditions should block"
+      tests:
+        - id: "custom-method-001"
+          name: "Wrong method should block"
+          type: "boundary"
+          expected_status: 403
+          request:
+            method: "GET"
+            uri: "/abcddonut_cs"
+            query_string: "id=1+union+select+1"
+            headers:
+              Content-Type: "multipart/form-data"
+              Host: "dxm3vhoegarcz.cloudfront.net"
+
+        - id: "custom-host-001"
+          name: "Wrong host should block"
+          type: "boundary"
+          expected_status: 403
+          request:
+            method: "POST"
+            uri: "/abcddonut_cs"
+            query_string: "id=1+union+select+1"
+            headers:
+              Content-Type: "multipart/form-data"
+              Host: "wrong-host.cloudfront.net"

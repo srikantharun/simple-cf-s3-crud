@@ -1,0 +1,236 @@
+  payment-gen/
+  ├── configs/                    # YAML policy configurations
+  │   └── example_policy.yaml     # Your WAF policy definition
+  ├── generator/                  # Python code that generates Terraform
+  │   ├── __init__.py
+  │   ├── waf_generator.py        # CLI entry point
+  │   ├── validators.py           # YAML validation
+  │   ├── rule_builder.py         # WAF rule statement builder
+  │   ├── terraform_builder.py    # Terraform HCL generator
+  │   └── test_generator.py       # Test case generator
+  ├── test_data/                  # Sample files for curl tests
+  │   ├── test.json
+  │   └── test.txt
+  ├── output/                     # Generated output (created when you run)
+  │   └── donutv8/
+  │       ├── terraform/          # Generated .tf files
+  │       └── tests/              # Generated test scripts
+  ├── requirements.txt
+  └── README.md
+
+  ---
+  1. configs/ - YAML Policy Definitions
+
+  File: example_policy.yaml
+
+  This is your input file - the single source of truth for your WAF policy.
+
+  | Section                | Purpose                                                                             |
+  |------------------------|-------------------------------------------------------------------------------------|
+  | metadata               | Project name, policy name, account ID, owner                                        |
+  | settings               | Scope (CLOUDFRONT/REGIONAL), FMS settings, resource tags, FMS policy resource names |
+  | allowed_hosts          | Reusable host definitions with match types                                          |
+  | custom_response_bodies | JSON responses for blocked requests                                                 |
+  | rule_groups            | The core - defines all rule groups (external, custom, module)                       |
+  | security_policy        | Order of rule groups in the FMS policy                                              |
+  | test_definitions       | Test cases to validate the WAF rules                                                |
+
+  Rule Group Types:
+  rule_groups:
+    # TYPE 1: external - References common module ARNs (passed as variables)
+    size_restrictions:
+      type: "external"
+      arn_variable: "waf_rg_size_restrictions_arn"
+
+    # TYPE 2: custom - Creates aws_wafv2_rule_group in this module
+    exception_rules:
+      type: "custom"
+      name: "custom${project}"
+      rules: [...]
+
+    # TYPE 3: module - References terraform module (catch-all patterns)
+    xss_catch_all:
+      type: "module"
+      module_source: "../../../custom_catch_application"
+
+  ---
+  2. generator/ - Python Code
+
+  waf_generator.py - CLI Entry Point
+
+  python waf_generator.py --config configs/example_policy.yaml --output ./output
+
+  What it does:
+  1. Loads YAML config
+  2. Validates with validators.py
+  3. Generates Terraform with terraform_builder.py
+  4. Generates tests with test_generator.py
+
+  Options:
+  - --validate-only - Just validate, don't generate
+  - --tests-only - Generate only test files
+  - --terraform-only - Generate only Terraform files
+  - --debug - Verbose output
+
+  ---
+  validators.py - YAML Validation
+
+  What it validates:
+  - Required sections exist (metadata, settings, rule_groups)
+  - Valid scopes (CLOUDFRONT, REGIONAL)
+  - Valid rule types (external, custom, module, ip_set, managed)
+  - Valid fields (BODY, QUERY_STRING, URI_PATH, etc.)
+  - IP addresses are valid CIDR notation
+  - External groups have arn_variable
+  - Custom groups have rules
+  - Module groups have module_source
+
+  ---
+  rule_builder.py - WAF Statement Builder
+
+  Key functions:
+
+  | Function                          | Purpose                                       |
+  |-----------------------------------|-----------------------------------------------|
+  | build_statement()                 | Converts YAML statement → Terraform HCL       |
+  | build_and_statement()             | Handles and: compound statements              |
+  | build_or_statement()              | Handles or: compound statements               |
+  | build_or_methods_statement()      | Shorthand: or_methods: ["post", "get"]        |
+  | build_or_hosts_statement()        | Shorthand: or_hosts: "${allowed_hosts}"       |
+  | build_byte_match_statement()      | byte_match rules                              |
+  | build_sqli_match_statement()      | SQL injection detection                       |
+  | build_xss_match_statement()       | XSS detection                                 |
+  | build_size_constraint_statement() | Size limit rules                              |
+  | build_label_match_statement()     | Label matching for exception/catch-all        |
+  | expand_template()                 | Expands ${account_id}, ${allowed_hosts}       |
+  | sanitize_resource_name()          | Converts names to valid Terraform identifiers |
+
+  Example transformation:
+  # YAML Input
+  statement:
+    and:
+      - or_methods: ["post"]
+      - byte_match:
+          field: "URI_PATH"
+          search_string: "/api/upload"
+  ↓
+  # Terraform Output
+  and_statement {
+    statement {
+      or_statement {
+        statement {
+          byte_match_statement {
+            search_string = "post"
+            field_to_match { method {} }
+          }
+        }
+      }
+    }
+    statement {
+      byte_match_statement {
+        search_string = "/api/upload"
+        field_to_match { uri_path {} }
+      }
+    }
+  }
+
+  ---
+  terraform_builder.py - Terraform HCL Generator
+
+  What it generates:
+
+  | File               | Content                               |
+  |--------------------|---------------------------------------|
+  | main.tf            | Provider config, locals (scope)       |
+  | versions.tf        | Terraform & AWS provider versions     |
+  | variables.tf       | Base vars + external ARN variables    |
+  | modules.tf         | Module blocks for catch-all patterns  |
+  | waf_rule_groups.tf | aws_wafv2_rule_group for custom rules |
+  | fms_policy.tf      | aws_fms_policy count & block policies |
+  | outputs.tf         | ARNs and IDs for all resources        |
+
+  Key methods:
+
+  | Method                           | Purpose                                            |
+  |----------------------------------|----------------------------------------------------|
+  | _get_resource_name()             | Gets flexible resource name from name field        |
+  | _generate_variables_tf()         | Creates input vars for external ARNs               |
+  | _generate_modules_tf()           | Creates module blocks for type=module              |
+  | _generate_rule_groups_tf()       | Creates rule groups for type=custom                |
+  | _generate_fms_policy_tf()        | Creates FMS policies with preProcessRuleGroups     |
+  | _build_pre_process_rule_groups() | Builds the JSON array for FMS managed_service_data |
+
+  ---
+  test_generator.py - Test Case Generator
+
+  What it generates:
+
+  | File            | Content                                   |
+  |-----------------|-------------------------------------------|
+  | test_cases.yaml | Structured test definitions               |
+  | test_runner.sh  | Executable bash script with curl commands |
+  | test_report.md  | Markdown documentation of all tests       |
+
+  Test types:
+  - true_positive - Should be blocked (expect 403)
+  - false_positive - Should be allowed (expect 200)
+  - boundary - Edge cases (wrong method, wrong host)
+
+  ---
+  3. Data Flow
+
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                    example_policy.yaml                          │
+  │  (metadata, settings, rule_groups, test_definitions)            │
+  └─────────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                     waf_generator.py                            │
+  │                    (CLI entry point)                            │
+  └─────────────────────────────────────────────────────────────────┘
+                                │
+            ┌───────────────────┼───────────────────┐
+            ▼                   ▼                   ▼
+  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
+  │  validators.py  │  │terraform_builder│  │ test_generator  │
+  │                 │  │      .py        │  │      .py        │
+  │ - Schema check  │  │                 │  │                 │
+  │ - Type check    │  │ Uses:           │  │ - test_cases    │
+  │ - CIDR check    │  │ rule_builder.py │  │ - test_runner   │
+  └─────────────────┘  └─────────────────┘  └─────────────────┘
+                                │                   │
+                                ▼                   ▼
+                       ┌─────────────────┐  ┌─────────────────┐
+                       │ output/donutv8/ │  │ output/donutv8/ │
+                       │   terraform/    │  │     tests/      │
+                       │ - main.tf       │  │ - test_runner.sh│
+                       │ - variables.tf  │  │ - test_cases.yml│
+                       │ - modules.tf    │  │ - test_report.md│
+                       │ - fms_policy.tf │  └─────────────────┘
+                       │ - waf_rule_*.tf │
+                       │ - outputs.tf    │
+                       └─────────────────┘
+
+  ---
+  4. How Engineers Use It
+
+  # 1. Edit the YAML config
+  vim configs/example_policy.yaml
+
+  # 2. Validate
+  python generator/waf_generator.py --config configs/example_policy.yaml --validate-only
+
+  # 3. Generate
+  python generator/waf_generator.py --config configs/example_policy.yaml --output ./output
+
+  # 4. Copy to your terraform-aws-fms-policies repo
+  cp -r output/donutv8/terraform/* ../terraform-aws-fms-policies/modules/custom/donutv8/
+
+  # 5. Reference in custom-policies.tf
+  module "donutv8" {
+    source = "./modules/custom/donutv8"
+    waf_rg_size_restrictions_arn = module.common.size_arn
+    ...
+  }
+
